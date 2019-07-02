@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+  <meta name="viewport" content="initial-scale=1.0, user-scalable=no"/>
+  <style type="text/css">
+    body, html, #warp {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      font-family: "微软雅黑";
+    }
+  </style>
+  <script type="text/javascript" src="https://api.map.baidu.com/api?v=2.0&&ak=GANo2ajua2rTiTTc05oKIrYr&s=1"></script>
+  <title>地图展示</title>
+</head>
+<body>
+<div id="warp"></div>
+</body>
+</html>
+<script type="text/javascript">
+
+  function QuadTree(level) {
+    this.level = level ? level : 0
+    if (this.level === 16) {
+      this.data = [] //存储数据
+    } else {
+      this.children = [undefined, undefined, undefined, undefined]//子节点
+    }
+  }
+
+  QuadTree.prototype = {
+    wrapNW: {
+      lng: 73.465751,
+      lat: 53.476079,
+      bdX: 8178258.98,
+      bdY: 7036882.86
+    },
+    wrapSE: {
+      lng: 135.833306,
+      lat: 1.852016,
+      bdX: 15121058.99,
+      bdY: 204808.39
+    },
+    origin: {
+      bdX: 4233758,
+      bdY: 204808,
+      x: 0,
+      y: 0
+    },
+    sqrt3: Math.sqrt(3),
+    width: 300,
+    height: 300 * Math.sqrt(3) / 2,
+    projection: new BMap.MercatorProjection(),
+    /**
+     * 插入数据
+     * @param pointData 原始数据，必须带有lng、lat属性
+     */
+    insert: function (pointData) {
+      if (this.level === 16) {
+        // 如果是第16级，直接存储数据
+        this.data.push(pointData)
+      } else {
+        // 不是第16级，判断属于哪个子节点
+
+        // 经纬度转换为百度平面坐标和菱形网格坐标
+        if (pointData.x === undefined) {
+          var p = this._getCoordByPoint({lng: pointData.lng, lat: pointData.lat})
+          pointData.x = p.x
+          pointData.y = p.y
+          pointData.bdX = p.bdX
+          pointData.bdY = p.bdY
+        }
+
+        //重复使用的值,计算了保存起来
+        if (this.pow2Level === undefined) {
+          this.pow2Level = Math.pow(2, 15 - this.level)
+        }
+
+        // 计算子节点
+        var x = Math.floor(pointData.x / this.pow2Level) % 2
+        var y = Math.floor(pointData.y / this.pow2Level) % 2
+        var index = x + 2 * y
+
+        // 子节点不存在就创建一个
+        if (this.children[index] === undefined) {
+          this.children[index] = new QuadTree(this.level + 1)
+        }
+
+        // 递归调用子节点的insert方法
+        this.children[index].insert(pointData)
+      }
+    },
+    /**
+     * 查询范围内的六边形网格数据
+     * @param nw 西北角经纬度
+     * @param se 东南角经纬度
+     * @param level 网格层级
+     * @returns {Array} 网格数组
+     */
+    getData: function (nw, se, level) {
+      if (this.level !== 0) {
+        throw new Error('getData:必须由根节点调用')
+      }
+      // 第一步，取出范围内，菱形网格的数据
+      var nwCoord = this._getCoordByPoint(nw)
+      var seCoord = this._getCoordByPoint(se)
+      var step = Math.pow(2, 16 - level)
+      //扩大边界，防止边缘数据不全
+      var startX = nwCoord.x - nwCoord.x % step - 2 * step
+      var startY = seCoord.y - seCoord.y % step - step
+      var endX = seCoord.x - seCoord.x % step + 2 * step
+      var endY = nwCoord.y - nwCoord.y % step + step
+      var container = {}
+
+      var x1, x2, y1, y2;
+      var arr = []
+      for (var y = startY; y <= endY; y += step) {
+        // 过滤掉菱形左下角和右上角的多余数据
+        y1 = endY - y
+        x1 = Math.floor(y1 / step / 2) * step
+        y2 = y - startY
+        x2 = Math.floor(y2 / step / 2) * step
+        for (var x = startX + x1; x <= endX - x2; x += step) {
+          var node = this._queryNode({x: x, y: y}, level)
+          if (node) {
+            var data = node._getAll()
+            if (container[x] === undefined) {
+              container[x] = {}
+            }
+            container[x][y] = data
+            arr.push.apply(arr, data)
+          }
+        }
+      }
+
+      // 第二步，聚合到六边形网格
+      this.hexagonData = {}
+      startX = nwCoord.x - nwCoord.x % step
+      startY = seCoord.y - seCoord.y % step
+      endX = seCoord.x - seCoord.x % step + step
+      endY = nwCoord.y - nwCoord.y % step + step
+      var hexagonArr = []
+      var sideLength = Math.pow(2, 16 - level) * this.width / this.sqrt3
+      for (y = startY; y <= endY; y += step) {
+        // 过滤掉菱形左下角和右上角的多余数据
+        y1 = endY - y
+        x1 = Math.floor(y1 / step / 2) * step
+        y2 = y - startY
+        x2 = Math.floor(y2 / step / 2) * step
+        for (x = startX + x1; x <= endX - x2; x += step) {
+          var centerPx = this._getPixelByCoord({x: x, y: y})
+          var list = []
+          var _insideHexagon = this._insideHexagon
+
+          // 判断是否在六边形内，并添加到数组
+          function add(centerPx, sideLength, pointData, list) {
+            if (_insideHexagon(centerPx, sideLength, pointData)) {
+              list.push(pointData)
+            }
+          }
+
+          // 在周围四个菱形中遍历属于六边形的点
+          var arr, i;
+          if (container[x] && container[x][y]) {
+            arr = container[x][y]
+            for (i = 0; i < arr.length; i++) {
+              add(centerPx, sideLength, arr[i], list)
+            }
+          }
+          if (container[x - step] && container[x - step][y]) {
+            arr = container[x - step][y]
+            for (i = 0; i < arr.length; i++) {
+              add(centerPx, sideLength, arr[i], list)
+            }
+          }
+          if (container[x] && container[x][y - step]) {
+            arr = container[x][y - step]
+            for (i = 0; i < arr.length; i++) {
+              add(centerPx, sideLength, arr[i], list)
+            }
+          }
+          if (container[x - step] && container[x - step][y - step]) {
+            arr = container[x - step][y - step]
+            for (i = 0; i < arr.length; i++) {
+              add(centerPx, sideLength, arr[i], list)
+            }
+          }
+          if (list.length > 0) {
+            var index = x + y * 65536
+            var hexagon = {
+              index: index,
+              center: this.projection.pointToLngLat({x: centerPx.bdX, y: centerPx.bdY}),
+              list: list,
+              total: list.length,
+              corners: this._getCorners(centerPx, sideLength)
+            }
+            hexagonArr.push(hexagon)
+            this.hexagonData[index] = hexagon
+          }
+        }
+      }
+
+      return hexagonArr
+    },
+    getHexagonDataByIndex: function (index) {
+      return this.hexagonData[index] ? this.hexagonData[index] : null
+    },
+    /**
+     * 根据经纬度坐标转换为网格坐标
+     */
+    _getCoordByPoint: function (point) {
+      var p = this.projection.lngLatToPoint(point)
+      var disX = p.x - this.origin.bdX
+      var disY = p.y - this.origin.bdY
+      var y = Math.floor(disY / this.height)
+      var x;
+      if (y > 0) {
+        x = Math.floor((disX - disY / this.sqrt3) / this.width)
+      } else {
+        x = Math.floor((disX + disY / this.sqrt3) / this.width)
+      }
+      return {x: x, y: y, bdX: p.x, bdY: p.y}
+    },
+    /**
+     * 网格坐标转换为百度平面坐标
+     */
+    _getPixelByCoord: function (coord) {
+      var disY = coord.y * this.height;
+      var bdY = disY + this.origin.bdY;
+      var bdX;
+      if (coord.y >= 0) {
+        bdX = coord.x * this.width + disY / this.sqrt3 + this.origin.bdX
+      } else {
+        bdX = coord.x * this.width - disY / this.sqrt3 + this.origin.bdX
+      }
+      return {bdX: bdX, bdY: bdY}
+    },
+    /**
+     * 递归节点及子节点的所有数据
+     * @returns 数据数组
+     */
+    _getAll: function () {
+      if (this.level === 16) {
+        // 如果是第16级，就返回数据数组的副本
+        return this.data.slice(0)
+      }
+      var data;
+      // 递归子节点
+      for (var i = 0; i < 4; i++) {
+        if (this.children[i]) {
+          var childData = this.children[i]._getAll()
+          if (data === undefined) {
+            data = childData // 减少一次数组合并，提高性能
+          } else {
+            data.push.apply(data, childData) // 数组合并
+          }
+        }
+      }
+      return data;
+    },
+    /**
+     * 根据网格坐标和层级，查询对应的节点
+     * @param coord 网格坐标
+     * @param level 层级
+     * @returns 返回节点对象，不存在节点返回null
+     */
+    _queryNode: function (coord, level) {
+      if (level === undefined || level < 0 || level > 16) {
+        throw new Error('_queryNode:level参数必须为0-16')
+      }
+      if (this.level > level) {
+        throw new Error('_queryNode:level参数必须大于当前节点level')
+      }
+
+      // 找到节点，返回节点对象
+      if (level === this.level) {
+        return this
+      }
+
+      // 重复使用的值,计算了保存起来
+      if (this.pow2Level === undefined) {
+        this.pow2Level = Math.pow(2, 15 - this.level)
+      }
+      // 计算子节点
+      var x = Math.floor(coord.x / this.pow2Level) % 2
+      var y = Math.floor(coord.y / this.pow2Level) % 2
+      var index = x + 2 * y
+      return this.children[index] ? this.children[index]._queryNode(coord, level) : null
+    },
+    /**
+     * 判断在六边形内部
+     */
+    _insideHexagon: function (centerPx, sideLength, pointPx) {
+      var x = Math.abs(centerPx.bdX - pointPx.bdX)
+      var y = Math.abs(centerPx.bdY - pointPx.bdY)
+      if (y > sideLength || x > Math.sqrt(3) * sideLength / 2) {
+        return false
+      }
+      return sideLength - y > x / Math.sqrt(3)
+    },
+    /**
+     * 根据中心点和边长，算出六个角的坐标
+     */
+    _getCorners: function (centerPx, sideLength) {
+      var list = []
+      for (var i = 0; i < 6; i++) {
+        var p = {}
+        var x = i % 3 === 0 ? 0 : this.sqrt3 * sideLength / 2
+        var y = i % 3 === 0 ? sideLength : sideLength / 2
+        p.x = i > 3 ? centerPx.bdX - x : centerPx.bdX + x
+        p.y = i > 1 && i < 5 ? centerPx.bdY - y : centerPx.bdY + y
+        var lnglat = this.projection.pointToLngLat(p)
+        list.push(lnglat)
+      }
+      return list
+    },
+  }
+
+
+  function MyMap(options) {
+    this.map = new BMap.Map(options.tagId);
+    this.map.enableScrollWheelZoom(true);
+    this.map.setMinZoom(12)
+    this.map.setMaxZoom(16)
+    if (options.cityName) {
+      this.setCity(options.cityName)
+    }
+    if (options.clickCallback) {
+      this.clickCallback = options.clickCallback
+    }
+    this.map.addEventListener("dragend", change);
+    this.map.addEventListener("resize", change);
+    this.map.addEventListener("zoomend", change);
+    this.map.addEventListener("load", change);
+    var changeFlag = false
+    var self = this
+
+    function change() {
+      var bounds = self.map.getBounds()
+      if (!bounds.Le) return; //确保能取到正确的边界数据
+
+      // 降低事件的频率
+      if (changeFlag) return;
+      changeFlag = true
+      setTimeout(function () {
+        changeFlag = false
+      }, 500)
+
+      var nw = new BMap.Point(bounds.Le, bounds.Vd)// 西北角
+      var se = new BMap.Point(bounds.He, bounds.Xd)// 东南角
+      var zoom = self.map.getZoom()
+      if (options.changeCallback) {
+        options.changeCallback.call(self, nw, se, zoom)
+      }
+    }
+  }
+
+  MyMap.prototype = {
+    /**
+     * 切换城市
+     */
+    setCity: function (cityName) {
+      var map = this.map
+      var myGeo = new BMap.Geocoder();
+      myGeo.getPoint(cityName, function (point) {
+        if (point) {
+          map.centerAndZoom(point, 13);
+        }
+      }, "");
+    },
+    /**
+     * 画六边形和数字
+     */
+    draw: function (data) {
+      var self = this
+      var polygon;
+      for (var i = 0; i < data.length; i++) {
+        // 画六边形
+        polygon = new BMap.Polygon(data[i].corners, {
+          strokeColor: "#FFFFFF",   //边线颜色。
+          fillColor: "#0033FF",     //填充颜色。当参数为空时，圆形将没有填充效果。
+          strokeWeight: 2,      //边线的宽度，以像素为单位。
+          strokeOpacity: 0.4,   //边线透明度，取值范围0 - 1。
+          fillOpacity: 0.3,     //填充的透明度，取值范围0 - 1。
+          strokeStyle: 'solid'  //边线的样式，solid或dashed
+        });
+        polygon.data = data[i]
+        polygon.addEventListener('click', function () {
+          if (self.clickCallback) {
+            self.clickCallback.call(this.data, this.data)
+          }
+        })
+        this.map.addOverlay(polygon)
+
+        // 标出数字
+        var total = data[i].total.toString()
+        var opts = {
+          position: data[i].center,    // 指定文本标注所在的地理位置
+          offset: new BMap.Size(0 - total.length * 12 / 2, -10)    //设置文本偏移量
+        }
+        var label = new BMap.Label(total, opts);  // 创建文本标注对象
+        label.setStyle({
+          color: "#994400",
+          fontSize: "20px",
+          height: "20px",
+          lineHeight: "20px",
+          fontFamily: "微软雅黑",
+          backgroundColor: 'transparent',
+          border: 'none'
+        });
+        label.data = data[i]
+        label.addEventListener('click', function () {
+          if (self.clickCallback) {
+            self.clickCallback.call(this.data, this.data)
+          }
+        })
+        this.map.addOverlay(label);
+      }
+    },
+    /**
+     * 清除覆盖物
+     */
+    clearOverlays: function () {
+      this.map.clearOverlays()
+    }
+  }
+
+
+  var root = new QuadTree();
+  var t1 = new Date()
+  for (var i = 0; i < 50000; i++) {
+    var lng = 114.058803 - 3 + Math.random() * 6
+    var lat = 22.549257 - 3 + Math.random() * 6
+    root.insert({
+      lng: lng,
+      lat: lat,
+      content: '测试数据'
+    })
+  }
+  var t2 = new Date()
+  console.log('导入数据', t2.getTime() - t1.getTime())
+
+
+  var myMap = new MyMap({
+    tagId: 'warp',
+    cityName: '深圳',
+    changeCallback: function (nw, se, zoom) {
+      // nw:西北角  se:东南角   zoom:缩放级别
+      t1 = new Date()
+      var data = root.getData(nw, se, zoom)
+      var t2 = new Date()
+      console.log('取出数据时间：', t2.getTime() - t1.getTime())
+      this.clearOverlays()
+      this.draw(data)
+    },
+    clickCallback: function (data) {
+      console.log('clickCallback', data)
+    }
+  })
+
+
+</script>
