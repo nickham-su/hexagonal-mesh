@@ -431,8 +431,8 @@
   var root = new QuadTree();
   var t1 = new Date()
   for (var i = 0; i < 50000; i++) {
-    var lng = 114.058803 - 3 + Math.random() * 6
-    var lat = 22.549257 - 3 + Math.random() * 6
+    var lng = 116.399669 - 3 + Math.random() * 6
+    var lat = 39.919805 - 3 + Math.random() * 6
     root.insert({
       lng: lng,
       lat: lat,
@@ -445,7 +445,7 @@
 
   var myMap = new MyMap({
     tagId: 'warp',
-    cityName: '深圳',
+    cityName: '北京',
     changeCallback: function (nw, se, zoom) {
       // nw:西北角  se:东南角   zoom:缩放级别
       t1 = new Date()
