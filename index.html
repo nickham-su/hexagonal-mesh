@@ -322,7 +322,7 @@
   function MyMap(options) {
     this.map = new BMap.Map(options.tagId);
     this.map.enableScrollWheelZoom(true);
-    this.map.setMinZoom(12)
+    this.map.setMinZoom(11)
     this.map.setMaxZoom(16)
     if (options.cityName) {
       this.setCity(options.cityName)
@@ -339,7 +339,8 @@
 
     function change() {
       var bounds = self.map.getBounds()
-      if (!bounds.Le) return; //确保能取到正确的边界数据
+      console.log(1,bounds)
+      if (!bounds.El) return; //确保能取到正确的边界数据
 
       // 降低事件的频率
       if (changeFlag) return;
@@ -348,8 +349,11 @@
         changeFlag = false
       }, 500)
 
-      var nw = new BMap.Point(bounds.Le, bounds.Vd)// 西北角
-      var se = new BMap.Point(bounds.He, bounds.Xd)// 东南角
+      var sw = bounds.getSouthWest()
+      var ne = bounds.getNorthEast()
+
+      var nw = new BMap.Point(sw.lng, ne.lat)// 西北角
+      var se = new BMap.Point(ne.lng,sw.lat)// 东南角
       var zoom = self.map.getZoom()
       if (options.changeCallback) {
         options.changeCallback.call(self, nw, se, zoom)
